@@ -15,6 +15,7 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
+import * as ModalDialog from 'resource:///org/gnome/shell/ui/modalDialog.js';
 import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
 const REFRESH_INTERVAL = 30 * 60; // 30 minutes in seconds
@@ -41,13 +42,15 @@ const CanvasIndicator = GObject.registerClass(
             this._assignments = [];
             this._dismissedAssignments = new Set();
             this._notifiedAssignments = new Set();
+            this._customNames = {}; // Map of assignment ID to custom name
             this._currentAssignmentIndex = 0;
 
             // HTTP session
             this._httpSession = new Soup.Session();
 
-            // Load dismissed assignments
+            // Load dismissed assignments and custom names
             this._loadDismissedAssignments();
+            this._loadCustomNames();
 
             // Create popup menu
             this._createMenu();
@@ -137,8 +140,9 @@ const CanvasIndicator = GObject.registerClass(
 
                     // Assignment button (clickable to open)
                     let assignmentBox = new St.BoxLayout({ vertical: true, x_expand: true });
+                    let displayName = this._getDisplayName(assignment);
                     let nameLabel = new St.Label({
-                        text: `${assignment.course_name}: ${assignment.name}`,
+                        text: displayName,
                         style_class: 'popup-menu-item-label'
                     });
                     let dateLabel = new St.Label({
@@ -149,6 +153,20 @@ const CanvasIndicator = GObject.registerClass(
                     assignmentBox.add_child(nameLabel);
                     assignmentBox.add_child(dateLabel);
 
+                    // Edit button
+                    let editButton = new St.Button({
+                        child: new St.Icon({
+                            icon_name: 'document-edit-symbolic',
+                            icon_size: 16
+                        }),
+                        style_class: 'button',
+                        style: 'padding: 4px; margin-left: 8px;'
+                    });
+
+                    editButton.connect('clicked', () => {
+                        this._showEditDialog(assignment);
+                    });
+
                     // Dismiss button
                     let dismissButton = new St.Button({
                         child: new St.Icon({
@@ -156,7 +174,7 @@ const CanvasIndicator = GObject.registerClass(
                             icon_size: 16
                         }),
                         style_class: 'button',
-                        style: 'padding: 4px; margin-left: 8px;'
+                        style: 'padding: 4px; margin-left: 4px;'
                     });
 
                     dismissButton.connect('clicked', () => {
@@ -164,6 +182,7 @@ const CanvasIndicator = GObject.registerClass(
                     });
 
                     container.add_child(assignmentBox);
+                    container.add_child(editButton);
                     container.add_child(dismissButton);
 
                     // Make the container clickable to open URL
@@ -198,8 +217,9 @@ const CanvasIndicator = GObject.registerClass(
                     });
 
                     let assignmentBox = new St.BoxLayout({ vertical: true, x_expand: true });
+                    let displayName = this._getDisplayName(assignment);
                     let nameLabel = new St.Label({
-                        text: `${assignment.course_name}: ${assignment.name}`,
+                        text: displayName,
                         style_class: 'popup-menu-item-label',
                         style: 'color: #666;'
                     });
@@ -211,6 +231,20 @@ const CanvasIndicator = GObject.registerClass(
                     assignmentBox.add_child(nameLabel);
                     assignmentBox.add_child(dateLabel);
 
+                    // Edit button
+                    let editButton = new St.Button({
+                        child: new St.Icon({
+                            icon_name: 'document-edit-symbolic',
+                            icon_size: 16
+                        }),
+                        style_class: 'button',
+                        style: 'padding: 4px; margin-left: 8px;'
+                    });
+
+                    editButton.connect('clicked', () => {
+                        this._showEditDialog(assignment);
+                    });
+
                     // Restore button
                     let restoreButton = new St.Button({
                         child: new St.Icon({
@@ -218,7 +252,7 @@ const CanvasIndicator = GObject.registerClass(
                             icon_size: 16
                         }),
                         style_class: 'button',
-                        style: 'padding: 4px; margin-left: 8px;'
+                        style: 'padding: 4px; margin-left: 4px;'
                     });
 
                     restoreButton.connect('clicked', () => {
@@ -226,6 +260,7 @@ const CanvasIndicator = GObject.registerClass(
                     });
 
                     container.add_child(assignmentBox);
+                    container.add_child(editButton);
                     container.add_child(restoreButton);
 
                     let item = new PopupMenu.PopupBaseMenuItem();
@@ -311,8 +346,9 @@ const CanvasIndicator = GObject.registerClass(
             let assignment = activeAssignments[this._currentAssignmentIndex];
             let dueDate = new Date(assignment.due_at);
             let dateStr = this._formatShortDate(dueDate);
+            let displayName = this._getDisplayName(assignment);
 
-            let displayText = `📚 ${assignment.name} (${dateStr})`;
+            let displayText = `📚 ${displayName} (${dateStr})`;
 
             // Fade out, change text, fade in
             this._label.ease({
@@ -389,6 +425,121 @@ const CanvasIndicator = GObject.registerClass(
             this._saveDismissedAssignments();
             this._updateDisplay();
             this._updateMenu();
+        }
+
+        _loadCustomNames() {
+            try {
+                let customNamesFile = Gio.File.new_for_path(this._extensionPath + '/customNames.json');
+                if (!customNamesFile.query_exists(null)) {
+                    return;
+                }
+
+                let [success, contents] = customNamesFile.load_contents(null);
+                if (success) {
+                    let decoder = new TextDecoder('utf-8');
+                    let json = decoder.decode(contents);
+                    this._customNames = JSON.parse(json);
+                }
+            } catch (e) {
+                log(`Canvas Extension: Error loading custom names: ${e.message}`);
+            }
+        }
+
+        _saveCustomNames() {
+            try {
+                let customNamesFile = Gio.File.new_for_path(this._extensionPath + '/customNames.json');
+                let json = JSON.stringify(this._customNames, null, 2);
+                customNamesFile.replace_contents(
+                    json,
+                    null,
+                    false,
+                    Gio.FileCreateFlags.REPLACE_DESTINATION,
+                    null
+                );
+            } catch (e) {
+                log(`Canvas Extension: Error saving custom names: ${e.message}`);
+            }
+        }
+
+        _getDisplayName(assignment) {
+            // Return custom display string if set, otherwise return default format
+            if (this._customNames[assignment.id]) {
+                return this._customNames[assignment.id];
+            }
+            return `${assignment.course_name}: ${assignment.name}`;
+        }
+
+        _showEditDialog(assignment) {
+            let dialog = new ModalDialog.ModalDialog();
+
+            // Add title
+            let headline = new St.Label({
+                text: 'Edit Assignment Display',
+                style: 'font-weight: bold; font-size: 1.2em; margin-bottom: 10px;'
+            });
+            dialog.contentLayout.add_child(headline);
+
+            // Show original format
+            let originalLabel = new St.Label({
+                text: `Original: ${assignment.course_name}: ${assignment.name}`,
+                style: 'margin-bottom: 10px; color: #888; font-size: 0.9em;'
+            });
+            dialog.contentLayout.add_child(originalLabel);
+
+            // Text entry for custom display string
+            let currentDisplay = this._customNames[assignment.id] || `${assignment.course_name}: ${assignment.name}`;
+            let entry = new St.Entry({
+                style_class: 'run-dialog-entry',
+                hint_text: 'Enter custom display text...',
+                text: currentDisplay,
+                can_focus: true,
+                x_expand: true
+            });
+            dialog.contentLayout.add_child(entry);
+
+            // Add buttons
+            dialog.addButton({
+                label: 'Cancel',
+                action: () => {
+                    dialog.close();
+                },
+                key: Clutter.KEY_Escape
+            });
+
+            dialog.addButton({
+                label: 'Reset to Original',
+                action: () => {
+                    delete this._customNames[assignment.id];
+                    this._saveCustomNames();
+                    this._updateDisplay();
+                    this._updateMenu();
+                    dialog.close();
+                }
+            });
+
+            dialog.addButton({
+                label: 'Save',
+                action: () => {
+                    let newDisplay = entry.get_text().trim();
+                    let originalDisplay = `${assignment.course_name}: ${assignment.name}`;
+                    if (newDisplay && newDisplay !== originalDisplay) {
+                        this._customNames[assignment.id] = newDisplay;
+                    } else if (newDisplay === originalDisplay) {
+                        // If set back to original, remove custom display
+                        delete this._customNames[assignment.id];
+                    }
+                    this._saveCustomNames();
+                    this._updateDisplay();
+                    this._updateMenu();
+                    dialog.close();
+                },
+                key: Clutter.KEY_Return
+            });
+
+            dialog.open();
+
+            // Focus the entry field
+            global.stage.set_key_focus(entry);
         }
 
         _checkNotifications() {
