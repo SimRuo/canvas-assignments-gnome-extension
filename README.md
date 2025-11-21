@@ -25,10 +25,10 @@ That's it. The extension should appear in your top panel.
 ## What it does
 
 - Shows assignments due in the next 14 days
-- Scrolls if there are too many to fit
 - Refreshes every 30 minutes
 - Sends notifications at 1 hour and 30 minutes before deadlines
 - Click to see details or open in browser
+- Right-click assignments to remove irrelevant ones from the list
 
 ## Troubleshooting
 
