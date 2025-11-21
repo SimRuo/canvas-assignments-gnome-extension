@@ -12,7 +12,7 @@ Get your Canvas API token first:
 Then:
 
 ```bash
-git clone https://github.com/YOUR-USERNAME/canvas-assignments-extension.git
+git clone
 cd canvas-assignments-extension
 chmod +x install.sh
 ./install.sh
