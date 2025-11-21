@@ -1,119 +1,45 @@
-# Canvas Assignments GNOME Shell Extension
+# Canvas Assignments Extension
 
-A GNOME Shell extension that displays your upcoming Canvas assignments in the top panel with automatic scrolling and notification reminders.
+I got tired of missing Canvas deadlines, so I made this little extension. It shows your upcoming assignments in the GNOME top panel and sends notifications before they're due.
 
-## Features
+## Setup
 
-- 📚 Shows upcoming assignments from Canvas LMS in the top panel
-- 🔄 Auto-scrolling when text is too long, static display when it fits
-- 🔔 Notifications at 1 hour and 30 minutes before assignment due dates
-- ⏰ Automatically refreshes every 30 minutes
-- 📅 Shows assignments due in the next 14 days
-- 🖱️ Click to see full list and open assignments in browser
+Get your Canvas API token first:
 
-## Installation
+- Go to Canvas → Settings → Approved Integrations → New Access Token
+- Copy it somewhere safe
 
-### Method 1: Manual Installation (Recommended)
+Then:
 
-1. Copy the extension folder to your GNOME Shell extensions directory:
-   ```bash
-   cp -r canvas-assignments-extension@du.se ~/.local/share/gnome-shell/extensions/
-   ```
+```bash
+git clone https://github.com/YOUR-USERNAME/canvas-assignments-extension.git
+cd canvas-assignments-extension
+chmod +x install.sh
+./install.sh
+```
 
-2. Restart GNOME Shell:
-   - On X11: Press `Alt + F2`, type `r`, and press Enter
-   - On Wayland: Log out and log back in
+The install script will create `config.js` from the template and guide you through adding your Canvas credentials.
 
-3. Enable the extension:
-   ```bash
-   gnome-extensions enable canvas-assignments-extension@du.se
-   ```
+That's it. The extension should appear in your top panel.
 
-### Method 2: Using Extension Manager
+## What it does
 
-1. Install GNOME Extensions app if you don't have it:
-   ```bash
-   sudo apt install gnome-shell-extension-manager
-   ```
-
-2. Copy the extension folder as in Method 1
-
-3. Open Extensions app and enable "Canvas Assignments"
-
-## Configuration
-
-The extension is pre-configured with your Canvas credentials. If you need to update them:
-
-1. Open `~/.local/share/gnome-shell/extensions/canvas-assignments-extension@du.se/extension.js`
-
-2. Modify these constants at the top:
-   ```javascript
-   const CANVAS_URL = 'https://canvas.du.se';
-   const API_TOKEN = 'your-api-token-here';
-   const REFRESH_INTERVAL = 30 * 60; // seconds
-   const DAYS_AHEAD = 14; // days to look ahead
-   ```
-
-3. Restart GNOME Shell for changes to take effect
-
-## Usage
-
-- **Top Panel**: Shows scrolling (or static) list of upcoming assignments
-- **Click Panel**: Opens dropdown menu with:
-  - Refresh button
-  - Complete list of assignments with due dates
-  - Click any assignment to open it in your browser
-
-- **Notifications**: Automatic reminders:
-  - 1 hour before due date
-  - 30 minutes before due date
+- Shows assignments due in the next 14 days
+- Scrolls if there are too many to fit
+- Refreshes every 30 minutes
+- Sends notifications at 1 hour and 30 minutes before deadlines
+- Click to see details or open in browser
 
 ## Troubleshooting
 
-### Extension doesn't show up
-```bash
-# Check if extension is installed
-gnome-extensions list
+Not working? Check the logs:
 
-# Check for errors
+```bash
 journalctl -f /usr/bin/gnome-shell
 ```
 
-### API Connection Issues
-- Verify your API token is still valid at https://canvas.du.se/profile/settings
-- Check your internet connection
-- Look for error messages in the logs
+You might need to restart your GNOME shell too. Alt + f2, input r.
 
-### Disable the extension
-```bash
-gnome-extensions disable canvas-assignments-extension@du.se
-```
+## Note
 
-### Remove the extension
-```bash
-rm -rf ~/.local/share/gnome-shell/extensions/canvas-assignments-extension@du.se
-```
-
-## Security Note
-
-Your Canvas API token is stored in plain text in the extension file. Keep your token secure:
-- Don't share your extension folder
-- Regenerate the token if compromised
-- Use a token with minimal required permissions
-
-## Compatibility
-
-- GNOME Shell 42, 43, 44, 45, 46
-- Ubuntu 22.04+, Fedora 36+, and other modern distributions
-- Tested on Ubuntu with default GNOME Shell
-
-## License
-
-MIT License - Feel free to modify and distribute
-
-## Support
-
-If you encounter issues:
-1. Check the logs: `journalctl -f /usr/bin/gnome-shell`
-2. Verify your API token is valid
-3. Make sure Canvas API is accessible from your network
+Your API token stays in config.js on your computer. It's gitignored so you won't accidentally push it to GitHub.

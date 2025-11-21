@@ -14,57 +14,40 @@ import GLib from 'gi://GLib';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import * as PanelMenu from 'resource:///org/gnome/shell/ui/panelMenu.js';
 import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
-import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTry.js';
+import * as MessageTray from 'resource:///org/gnome/shell/ui/messageTray.js';
+import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 
-// Load configuration
-const Config = imports.misc.extensionUtils.getCurrentExtension().imports.config;
-
-const CANVAS_URL = Config.CANVAS_URL;
-const API_TOKEN = Config.API_TOKEN;
 const REFRESH_INTERVAL = 30 * 60; // 30 minutes in seconds
 const DAYS_AHEAD = 14;
-const SCROLL_SPEED = 50; // pixels per second
-const STATIC_THRESHOLD = 400; // max width before scrolling kicks in
+const ROTATION_INTERVAL = 30; // seconds between assignment rotations
 
 const CanvasIndicator = GObject.registerClass(
     class CanvasIndicator extends PanelMenu.Button {
-        _init() {
+        _init(canvasUrl, apiToken, extensionPath) {
             super._init(0.0, 'Canvas Assignments');
 
-            // Create container for the scrolling text
-            this._container = new St.BoxLayout({
-                style_class: 'panel-button',
-                reactive: true,
-                can_focus: true,
-                track_hover: true
-            });
-            this.add_child(this._container);
-
-            // Create scrolling viewport
-            this._viewport = new St.Widget({
-                clip_to_allocation: true,
-                layout_manager: new Clutter.BinLayout()
-            });
-            this._container.add_child(this._viewport);
+            this._canvasUrl = canvasUrl;
+            this._apiToken = apiToken;
+            this._extensionPath = extensionPath;
 
             // Create label for assignments
             this._label = new St.Label({
                 text: 'Loading Canvas assignments...',
                 y_align: Clutter.ActorAlign.CENTER
             });
-            this._viewport.add_child(this._label);
+            this.add_child(this._label);
 
-            // Scrolling state
-            this._scrollOffset = 0;
-            this._needsScroll = false;
-            this._scrollTimeline = null;
-
-            // Assignment data
+            // Assignment data and rotation
             this._assignments = [];
+            this._dismissedAssignments = new Set();
             this._notifiedAssignments = new Set();
+            this._currentAssignmentIndex = 0;
 
             // HTTP session
             this._httpSession = new Soup.Session();
+
+            // Load dismissed assignments
+            this._loadDismissedAssignments();
 
             // Create popup menu
             this._createMenu();
@@ -92,10 +75,15 @@ const CanvasIndicator = GObject.registerClass(
                 }
             );
 
-            // Update layout when size changes
-            this._container.connect('notify::width', () => {
-                this._updateScrolling();
-            });
+            // Set up rotation timer (every 30 seconds)
+            this._rotationTimer = GLib.timeout_add_seconds(
+                GLib.PRIORITY_DEFAULT,
+                ROTATION_INTERVAL,
+                () => {
+                    this._rotateAssignment();
+                    return GLib.SOURCE_CONTINUE;
+                }
+            );
         }
 
         _createMenu() {
@@ -112,48 +100,153 @@ const CanvasIndicator = GObject.registerClass(
             // Add assignments list section
             this._menuSection = new PopupMenu.PopupMenuSection();
             this.menu.addMenuItem(this._menuSection);
+
+            // Add dismissed assignments section
+            this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
+            this._dismissedSection = new PopupMenu.PopupMenuSection();
+            this.menu.addMenuItem(this._dismissedSection);
         }
 
         _updateMenu() {
             // Clear existing items
             this._menuSection.removeAll();
+            this._dismissedSection.removeAll();
 
-            if (this._assignments.length === 0) {
+            // Filter out dismissed assignments
+            let activeAssignments = this._assignments.filter(a => !this._dismissedAssignments.has(a.id));
+            let dismissedAssignments = this._assignments.filter(a => this._dismissedAssignments.has(a.id));
+
+            if (activeAssignments.length === 0) {
                 let item = new PopupMenu.PopupMenuItem('No upcoming assignments', {
                     reactive: false
                 });
                 this._menuSection.addMenuItem(item);
-                return;
+            } else {
+                // Add each active assignment with dismiss button
+                activeAssignments.forEach(assignment => {
+                    let dateStr = this._formatDate(new Date(assignment.due_at));
+
+                    // Create a container for the assignment item
+                    let container = new St.BoxLayout({
+                        style_class: 'popup-menu-item',
+                        reactive: true,
+                        track_hover: true,
+                        can_focus: true,
+                        vertical: false
+                    });
+
+                    // Assignment button (clickable to open)
+                    let assignmentBox = new St.BoxLayout({ vertical: true, x_expand: true });
+                    let nameLabel = new St.Label({
+                        text: `${assignment.course_name}: ${assignment.name}`,
+                        style_class: 'popup-menu-item-label'
+                    });
+                    let dateLabel = new St.Label({
+                        text: `Due: ${dateStr}`,
+                        style_class: 'popup-menu-item-label',
+                        style: 'font-size: 0.9em; color: #888;'
+                    });
+                    assignmentBox.add_child(nameLabel);
+                    assignmentBox.add_child(dateLabel);
+
+                    // Dismiss button
+                    let dismissButton = new St.Button({
+                        child: new St.Icon({
+                            icon_name: 'window-close-symbolic',
+                            icon_size: 16
+                        }),
+                        style_class: 'button',
+                        style: 'padding: 4px; margin-left: 8px;'
+                    });
+
+                    dismissButton.connect('clicked', () => {
+                        this._dismissAssignment(assignment.id);
+                    });
+
+                    container.add_child(assignmentBox);
+                    container.add_child(dismissButton);
+
+                    // Make the container clickable to open URL
+                    let item = new PopupMenu.PopupBaseMenuItem();
+                    item.actor.add_child(container);
+                    item.connect('activate', () => {
+                        Gio.AppInfo.launch_default_for_uri(assignment.html_url, null);
+                    });
+
+                    this._menuSection.addMenuItem(item);
+                });
             }
 
-            // Add each assignment
-            this._assignments.forEach(assignment => {
-                let dateStr = this._formatDate(new Date(assignment.due_at));
-                let item = new PopupMenu.PopupMenuItem(
-                    `${assignment.course_name}: ${assignment.name}\nDue: ${dateStr}`
-                );
-
-                item.connect('activate', () => {
-                    Gio.AppInfo.launch_default_for_uri(
-                        assignment.html_url,
-                        null
-                    );
+            // Show dismissed assignments section if any
+            if (dismissedAssignments.length > 0) {
+                let headerItem = new PopupMenu.PopupMenuItem('Dismissed Assignments', {
+                    reactive: false,
+                    style_class: 'popup-menu-item'
                 });
+                headerItem.label.style = 'font-weight: bold; color: #888;';
+                this._dismissedSection.addMenuItem(headerItem);
 
-                this._menuSection.addMenuItem(item);
-            });
+                dismissedAssignments.forEach(assignment => {
+                    let dateStr = this._formatDate(new Date(assignment.due_at));
+
+                    let container = new St.BoxLayout({
+                        style_class: 'popup-menu-item',
+                        reactive: true,
+                        track_hover: true,
+                        can_focus: true,
+                        vertical: false
+                    });
+
+                    let assignmentBox = new St.BoxLayout({ vertical: true, x_expand: true });
+                    let nameLabel = new St.Label({
+                        text: `${assignment.course_name}: ${assignment.name}`,
+                        style_class: 'popup-menu-item-label',
+                        style: 'color: #666;'
+                    });
+                    let dateLabel = new St.Label({
+                        text: `Due: ${dateStr}`,
+                        style_class: 'popup-menu-item-label',
+                        style: 'font-size: 0.9em; color: #666;'
+                    });
+                    assignmentBox.add_child(nameLabel);
+                    assignmentBox.add_child(dateLabel);
+
+                    // Restore button
+                    let restoreButton = new St.Button({
+                        child: new St.Icon({
+                            icon_name: 'edit-undo-symbolic',
+                            icon_size: 16
+                        }),
+                        style_class: 'button',
+                        style: 'padding: 4px; margin-left: 8px;'
+                    });
+
+                    restoreButton.connect('clicked', () => {
+                        this._restoreAssignment(assignment.id);
+                    });
+
+                    container.add_child(assignmentBox);
+                    container.add_child(restoreButton);
+
+                    let item = new PopupMenu.PopupBaseMenuItem();
+                    item.actor.add_child(container);
+
+                    this._dismissedSection.addMenuItem(item);
+                });
+            }
         }
 
         _fetchAssignments() {
             let now = new Date();
             let futureDate = new Date(now.getTime() + DAYS_AHEAD * 24 * 60 * 60 * 1000);
 
-            let url = `${CANVAS_URL}/api/v1/users/self/upcoming_events?` +
-                `start_date=${now.toISOString()}&` +
-                `end_date=${futureDate.toISOString()}`;
+            // Use planner API to get upcoming assignments
+            let url = `${this._canvasUrl}/api/v1/planner/items?` +
+                `start_date=${now.toISOString().split('T')[0]}&` +
+                `end_date=${futureDate.toISOString().split('T')[0]}`;
 
             let message = Soup.Message.new('GET', url);
-            message.request_headers.append('Authorization', `Bearer ${API_TOKEN}`);
+            message.request_headers.append('Authorization', `Bearer ${this._apiToken}`);
 
             this._httpSession.send_and_read_async(
                 message,
@@ -165,17 +258,17 @@ const CanvasIndicator = GObject.registerClass(
                         let decoder = new TextDecoder('utf-8');
                         let response = decoder.decode(bytes.get_data());
 
-                        let events = JSON.parse(response);
+                        let items = JSON.parse(response);
 
                         // Filter for assignments only
-                        this._assignments = events
-                            .filter(event => event.type === 'assignment' && event.assignment)
-                            .map(event => ({
-                                id: event.assignment.id,
-                                name: event.assignment.name,
-                                due_at: event.assignment.due_at,
-                                course_name: event.context_name || 'Unknown Course',
-                                html_url: event.html_url
+                        this._assignments = items
+                            .filter(item => item.plannable_type === 'assignment' && item.plannable)
+                            .map(item => ({
+                                id: item.plannable.id,
+                                name: item.plannable.title,
+                                due_at: item.plannable.due_at,
+                                course_name: item.context_name || 'Unknown Course',
+                                html_url: `${this._canvasUrl}${item.html_url}`
                             }))
                             .sort((a, b) => new Date(a.due_at) - new Date(b.due_at));
 
@@ -190,81 +283,112 @@ const CanvasIndicator = GObject.registerClass(
         }
 
         _updateDisplay() {
-            if (this._assignments.length === 0) {
+            // Filter out dismissed assignments
+            let activeAssignments = this._assignments.filter(a => !this._dismissedAssignments.has(a.id));
+
+            if (activeAssignments.length === 0) {
                 this._label.set_text('📚 No upcoming assignments');
-                this._needsScroll = false;
-                this._stopScrolling();
                 return;
             }
 
-            // Create display text
-            let displayText = this._assignments.map(assignment => {
-                let dueDate = new Date(assignment.due_at);
-                let dateStr = this._formatShortDate(dueDate);
-                return `${assignment.course_name}: ${assignment.name} (${dateStr})`;
-            }).join('  •  ');
-
-            this._label.set_text(`📚 ${displayText}`);
-
-            // Check if scrolling is needed
-            this._updateScrolling();
-        }
-
-        _updateScrolling() {
-            let labelWidth = this._label.width;
-            let containerWidth = this._container.width;
-
-            if (labelWidth > STATIC_THRESHOLD && labelWidth > containerWidth) {
-                this._needsScroll = true;
-                this._startScrolling();
-            } else {
-                this._needsScroll = false;
-                this._stopScrolling();
-                this._label.set_position(0, 0);
-            }
-        }
-
-        _startScrolling() {
-            if (this._scrollTimeline) {
-                return; // Already scrolling
+            // Reset index if needed
+            if (this._currentAssignmentIndex >= activeAssignments.length) {
+                this._currentAssignmentIndex = 0;
             }
 
-            let labelWidth = this._label.width;
-            let containerWidth = this._container.width;
+            this._showCurrentAssignment();
+        }
 
-            if (labelWidth <= containerWidth) {
+        _showCurrentAssignment() {
+            // Filter out dismissed assignments
+            let activeAssignments = this._assignments.filter(a => !this._dismissedAssignments.has(a.id));
+
+            if (activeAssignments.length === 0) {
+                this._label.set_text('📚 No upcoming assignments');
                 return;
             }
 
-            // Calculate scroll duration based on text width
-            let scrollDistance = labelWidth + 100; // Add padding
-            let duration = (scrollDistance / SCROLL_SPEED) * 1000; // Convert to milliseconds
+            let assignment = activeAssignments[this._currentAssignmentIndex];
+            let dueDate = new Date(assignment.due_at);
+            let dateStr = this._formatShortDate(dueDate);
 
-            this._scrollTimeline = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 16, () => {
-                if (!this._needsScroll) {
-                    this._scrollTimeline = null;
-                    return GLib.SOURCE_REMOVE;
+            let displayText = `📚 ${assignment.name} (${dateStr})`;
+
+            // Fade out, change text, fade in
+            this._label.ease({
+                opacity: 0,
+                duration: 500,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                onComplete: () => {
+                    this._label.set_text(displayText);
+                    this._label.ease({
+                        opacity: 255,
+                        duration: 500,
+                        mode: Clutter.AnimationMode.EASE_IN_QUAD
+                    });
                 }
-
-                this._scrollOffset -= 1;
-
-                // Reset when fully scrolled
-                if (Math.abs(this._scrollOffset) >= labelWidth + 100) {
-                    this._scrollOffset = containerWidth;
-                }
-
-                this._label.set_position(this._scrollOffset, 0);
-
-                return GLib.SOURCE_CONTINUE;
             });
         }
 
-        _stopScrolling() {
-            if (this._scrollTimeline) {
-                GLib.source_remove(this._scrollTimeline);
-                this._scrollTimeline = null;
+        _rotateAssignment() {
+            // Filter out dismissed assignments
+            let activeAssignments = this._assignments.filter(a => !this._dismissedAssignments.has(a.id));
+
+            if (activeAssignments.length <= 1) {
+                return; // No need to rotate with 0 or 1 assignment
             }
-            this._scrollOffset = 0;
+
+            this._currentAssignmentIndex = (this._currentAssignmentIndex + 1) % activeAssignments.length;
+            this._showCurrentAssignment();
+        }
+
+        _loadDismissedAssignments() {
+            try {
+                let dismissedFile = Gio.File.new_for_path(this._extensionPath + '/dismissed.json');
+                if (!dismissedFile.query_exists(null)) {
+                    return;
+                }
+
+                let [success, contents] = dismissedFile.load_contents(null);
+                if (success) {
+                    let decoder = new TextDecoder('utf-8');
+                    let json = decoder.decode(contents);
+                    let dismissed = JSON.parse(json);
+                    this._dismissedAssignments = new Set(dismissed);
+                }
+            } catch (e) {
+                log(`Canvas Extension: Error loading dismissed assignments: ${e.message}`);
+            }
+        }
+
+        _saveDismissedAssignments() {
+            try {
+                let dismissedFile = Gio.File.new_for_path(this._extensionPath + '/dismissed.json');
+                let json = JSON.stringify(Array.from(this._dismissedAssignments));
+                dismissedFile.replace_contents(
+                    json,
+                    null,
+                    false,
+                    Gio.FileCreateFlags.REPLACE_DESTINATION,
+                    null
+                );
+            } catch (e) {
+                log(`Canvas Extension: Error saving dismissed assignments: ${e.message}`);
+            }
+        }
+
+        _dismissAssignment(assignmentId) {
+            this._dismissedAssignments.add(assignmentId);
+            this._saveDismissedAssignments();
+            this._updateDisplay();
+            this._updateMenu();
+        }
+
+        _restoreAssignment(assignmentId) {
+            this._dismissedAssignments.delete(assignmentId);
+            this._saveDismissedAssignments();
+            this._updateDisplay();
+            this._updateMenu();
         }
 
         _checkNotifications() {
@@ -354,19 +478,35 @@ const CanvasIndicator = GObject.registerClass(
                 this._notificationTimer = null;
             }
 
-            this._stopScrolling();
+            if (this._rotationTimer) {
+                GLib.source_remove(this._rotationTimer);
+                this._rotationTimer = null;
+            }
 
             super.destroy();
         }
     });
 
-export default class CanvasAssignmentsExtension {
-    constructor() {
-        this._indicator = null;
-    }
-
+export default class CanvasAssignmentsExtension extends Extension {
     enable() {
-        this._indicator = new CanvasIndicator();
+        // Load config from the extension directory
+        const configPath = this.path + '/config.js';
+        const configFile = Gio.File.new_for_path(configPath);
+        const [success, contents] = configFile.load_contents(null);
+
+        if (!success) {
+            log('Canvas Extension Error: Could not load config.js');
+            return;
+        }
+
+        const decoder = new TextDecoder('utf-8');
+        const configText = decoder.decode(contents);
+
+        // Execute config script to get variables
+        const configFunc = new Function(configText + '; return {CANVAS_URL, API_TOKEN};');
+        const config = configFunc();
+
+        this._indicator = new CanvasIndicator(config.CANVAS_URL, config.API_TOKEN, this.path);
         Main.panel.addToStatusArea('canvas-assignments', this._indicator);
     }
 
